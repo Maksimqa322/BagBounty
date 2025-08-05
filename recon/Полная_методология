@@ -1,0 +1,137 @@
+Отлично! Вот полная методология рекогносцировки (Recon) на русском языке, основанная на предоставленном руководстве, структурированная для эффективного поиска уязвимостей в Bug Bounty:
+
+**Методология "Recon to Master" для Bug Bounty**
+
+**Цель:** Систематически обнаружить максимально возможную атакуемую поверхность (subdomains, URLs, параметры, технологии, уязвимые точки) для последующего тестирования на уязвимости.
+
+**Этап 1: Сбор Субдоменов (Subdomain Enumeration)**
+1.  **Автоматизированный сбор:**
+    *   `subfinder -d example.com -all -recursive -o subfinder.txt`
+    *   `assetfinder --subs-only example.com > assetfinder.txt`
+    *   `findomain -t target.com | tee findomain.txt`
+    *   `amass enum -passive -d example.com | cut -d']' -f 2 | awk '{print $1}' | sort -u > amass_passive.txt`
+    *   `amass enum -active -d example.com | cut -d']' -f 2 | awk '{print $1}' | sort -u > amass_active.txt`
+    *   *Ключ:* Убедитесь, что все API ключи (VirusTotal, SecurityTrails, Shodan и т.д.) настроены в инструментах для максимального охвата.
+2.  **Ручной сбор из публичных источников:**
+    *   **SSL-сертификаты (crt.sh):** `curl -s "https://crt.sh/?q=%.example.com&output=json" | jq -r '.[].name_value' | sed 's/\*\.//g' | sort -u > crtsh.txt`
+    *   **Web Archive (Wayback Machine):** `curl -s "http://web.archive.org/cdx/search/cdx?url=*.example.com/*&output=text&fl=original&collapse=urlkey" | sed -e 's_https*://__' -e "s/\/.*//" -e 's/:.*//' -e 's/^www\.//' | sort -u > wayback.txt`
+    *   **VirusTotal:** `curl -s "https://www.virustotal.com/vtapi/v2/domain/report?apikey=ВАШ_API&domain=example.com" | jq -r '.domain_siblings[]' | sort -u > virustotal.txt`
+3.  **Поиск на GitHub:** `github-subdomains -d domain.com -t YOUR_GITHUB_TOKEN > github_subs.txt` (Ищет упоминания субдоменов в публичных репозиториях).
+4.  **Объединение и сортировка:** `cat subfinder.txt assetfinder.txt findomain.txt amass_*.txt crtsh.txt wayback.txt virustotal.txt github_subs.txt | sort -u > all_subs_raw.txt`
+5.  **Пермутация и DNS резолвинг:**
+    *   Генерация вариаций: `cat all_subs_raw.txt | alterx | sort -u > permuted_subs.txt`
+    *   Резолвинг живых: `cat all_subs_raw.txt permuted_subs.txt | dnsx -silent -resp -a -aaaa -cname | awk '{print $1}' | sort -u > resolved_subs.txt`
+6.  **Брутфорс субдоменов:** `ffuf -u "https://FUZZ.example.com" -w /path/to/seclists/Discovery/DNS/subdomains-top1million-5000.txt -mc 200,301,302,403 -ac -c -v -o fuzz_subs.txt`
+
+**Этап 2: Поиск IP-адресов и Инфраструктуры (IP & Asset Discovery)**
+1.  **Поиск IP через ASN (Autonomous System Number):**
+    *   Найти ASN: `amass intel -org "Название Организации"` или `whois example.com | grep -i origin`
+    *   Найти IP в ASN/CIDR: `asnmap -i 12345 | dnsx -silent -resp-only` (где `12345` - номер ASN) или `amass intel -active -cidr 192.168.1.0/24 -o cidr_ips.txt`
+2.  **Поиск IP через публичные API:**
+    *   Используйте команды `curl` из раздела "Harvesting IP Addresses Linked to Domains" для VirusTotal, OTX AlienVault, urlscan.io.
+3.  **Поиск связанных активов:** `amass intel -org "Название Организации"` (Находит связанные домены, IP, ASN).
+
+**Этап 3: Выявление Активных Хостов (Live Host Discovery)**
+1.  **Проверка доступности:** `cat resolved_subs.txt | httpx -ports 80,443,8080,8000,8443,8888 -threads 200 -title -tech-detect -status-code -content-length -o live_subs_tech.txt`
+    *   `-ports`: Указывает порты для проверки.
+    *   `-threads`: Ускоряет процесс.
+    *   `-tech-detect` (`-td`): Определяет технологии (PHP, ASP.NET, JS-фреймворки и т.д.).
+    *   `-title`, `-status-code`, `-content-length`: Полезная мета-информация.
+
+**Этап 4: Визуальная Разведка и Анализ (Visual Recon)**
+1.  **Скриншоты:** `cat live_subs_tech.txt | aquatone -ports 80,443,8000,8080,8443` (Создает отчет со скриншотами, помогает быстро идентифицировать админки, лендинги, важные сервисы).
+
+**Этап 5: Сбор URL и Путей (URL Enumeration)**
+1.  **Активный краулинг:**
+    *   `katana -u live_subs_tech.txt -d 3 -jc -kf all -o katana_urls.txt` (Глубина 3, обрабатывает JS, следует по всем ссылкам).
+    *   `hakrawler -u live_subs_tech.txt -d 3 -subs -js -plain > hakrawler_urls.txt`
+2.  **Пассивный сбор (исторические данные):**
+    *   `cat live_subs_tech.txt | gau --subs --mc 200 > gau_urls.txt`
+    *   `urlfinder -d example.com | sort -u > urlfinder_urls.txt`
+3.  **Объединение URL:** `cat katana_urls.txt hakrawler_urls.txt gau_urls.txt urlfinder_urls.txt | sort -u | uro | tee all_urls_raw.txt` (`uro` удаляет дубликаты по параметрам).
+
+**Этап 6: Анализ URL и Параметров (URL & Parameter Analysis)**
+1.  **Извлечение URL с параметрами:** `cat all_urls_raw.txt | grep '=' | sort -u > param_urls.txt`
+2.  **Извлечение URL по типам уязвимостей (GF Patterns):**
+    *   Установите `gf` и `GF-Patterns`.
+    *   Примеры:
+        *   `cat param_urls.txt | gf xss > xss_urls.txt`
+        *   `cat param_urls.txt | gf sqli > sqli_urls.txt`
+        *   `cat param_urls.txt | gf lfi > lfi_urls.txt`
+        *   `cat param_urls.txt | gf redirect > redirect_urls.txt`
+        *   `cat param_urls.txt | gf ssrf > ssrf_urls.txt`
+        *   (Аналогично для `rce`, `ssti`, `idor` и др.)
+3.  **Нормализация параметров:** `cat xss_urls.txt sqli_urls.txt lfi_urls.txt ... | sed 's/=.*/=/' | sort -u > fuzzable_urls.txt` (Оставляет `url?param=` для фаззинга).
+4.  **Поиск скрытых параметров (Arjun):**
+    *   `arjun -u https://target.com/endpoint -oT arjun_results.txt -t 20 --passive` (Пассивный - на основе JS/стат. анализа).
+    *   `arjun -u https://target.com/endpoint -oT arjun_results.txt -t 20 -w /path/to/param-wordlist.txt` (Активный брутфорс).
+
+**Этап 7: Поиск Чувствительных Файлов (Sensitive File Discovery)**
+1.  **По шаблонам URL:**
+    *   `cat all_urls_raw.txt | grep -E "\.(xls|xml|xlsx|json|pdf|sql|doc|docx|pptx|txt|zip|tar\.gz|tgz|bak|7z|rar|log|cache|secret|db|backup|yml|gz|config|csv|yaml|md|md5|tar|xz|7zip|p12|pem|key|crt|csr|sh|pl|py|java|class|jar|war|ear|sqlitedb|sqlite3|dbf|db3|accdb|mdb|sqlcipher|gitignore|env|ini|conf|properties|plist|cfg)$" > sensitive_files.txt`
+2.  **Брутфорс путей (Dirsearch/FFuF):**
+    *   `dirsearch -u https://target.com -e php,asp,aspx,jsp,js,html,txt,bak,old,conf,log,zip,sql,json,xml,env,yml,config --random-agent -r -R 3 -t 50 --exclude-status=400,401,404,429,500-599`
+    *   `ffuf -u https://target.com/FUZZ -w /path/to/dir-wordlist.txt -e .php,.bak,.old,.txt,.zip,.sql -ac -c -mc 200,301,302,403 -recursion -recursion-depth 2 -o ffuf_dir.txt`
+
+**Этап 8: Анализ JavaScript (JavaScript Recon)**
+1.  **Поиск JS файлов:**
+    *   `cat live_subs_tech.txt | katana -d 2 -jc | grep -E "\.js$" | sort -u > js_files.txt`
+    *   `cat all_urls_raw.txt | grep -E "\.js$" | sort -u >> js_files.txt`
+2.  **Проверка доступности:** `cat js_files.txt | httpx -mc 200 -content-type -fr | grep -i 'javascript' | awk '{print $1}' > live_js.txt`
+3.  **Поиск секретов в JS:**
+    *   `cat live_js.txt | while read url; do curl -s "$url" | grep -E -i "api[_-]?key|secret|token|password|auth|access[_-]?key|aws[_-]?key|bearer|jwt|credentials|passwd|pwd|encrypt|decrypt|private|hidden|internal"; done`
+    *   `nuclei -l live_js.txt -t /path/to/nuclei-templates/http/exposures/` (Используйте шаблоны Nuclei для поиска уязвимостей).
+4.  **Извлечение эндпоинтов из JS:**
+    *   Ручной анализ или инструменты типа `LinkFinder`, `JSFinder`.
+
+**Этап 9: Сканирование на Уязвимости (Automated Vulnerability Scanning)**
+1.  **Nuclei (Основной инструмент):**
+    *   `nuclei -l live_subs_tech.txt -t /path/to/nuclei-templates/ -bs 50 -c 50 -severity critical,high,medium -o nuclei_results.txt`
+    *   `nuclei -l fuzzable_urls.txt -t /path/to/nuclei-templates/ -tags xss,sqli -o nuclei_fuzz_results.txt`
+    *   *Ключ:* Используйте кастомные шаблоны и тэги (`-tags`) для прицельного сканирования.
+2.  **Специфичные сканеры:**
+    *   **WordPress:** `wpscan --url https://target.com --api-token YOUR_WPSCAN_TOKEN -e vp,vt,tt,cb,u --plugins-detection aggressive`
+    *   **Порты:** `naabu -list ips.txt -c 50 -nmap-cli 'nmap -sV -sC -oA naabu_nmap'` / `nmap -p- -sV -sC -T4 -A -oA fullscan target.com`
+
+**Этап 10: Фокусированное Тестирование Уязвимостей (Focused Vulnerability Testing)**
+*(Используйте подготовленные списки URL из Этапа 6)*
+1.  **SQLi:**
+    *   Проверка технологий: `cat live_subs_tech.txt | grep -Ei 'asp|php|jsp|aspx'`
+    *   Тестирование: `sqlmap -m sqli_urls.txt --batch --level 3 --risk 3` или Nuclei шаблоны.
+2.  **XSS:**
+    *   `cat xss_urls.txt | dalfox pipe --skip-bav -o dalfox_results.txt`
+    *   `cat fuzzable_urls.txt | Gxss -p Rxss | dalfox pipe`
+    *   Слепая XSS: `cat xss_urls.txt | nuclei -t /path/to/nuclei-templates/vulnerabilities/xss/ -tags blind`
+3.  **LFI:**
+    *   `nuclei -l lfi_urls.txt -t /path/to/nuclei-templates/http/vulnerabilities/generic/generic-linux-lfi.yaml`
+    *   `cat lfi_urls.txt | while read url; do ffuf -u "$url" -w /path/to/lfi-payloads.txt -mr "root:" -v; done`
+4.  **SSRF:**
+    *   `nuclei -l ssrf_urls.txt -t /path/to/nuclei-templates/http/vulnerabilities/ssrf/`
+    *   Ручное тестирование с Burp Collaborator: `curl "https://target.com/vuln?url=http://YOUR_COLLABORATOR"`
+    *   Обход фильтров: Альтернативные IP форматы (127.1, [::1], 2130706433, 0177.0.0.01).
+5.  **Open Redirect:**
+    *   `cat redirect_urls.txt | qsreplace "https://evil.com" | httpx -silent -fr -mr "evil.com"`
+    *   `subfinder -d target.com | httpx -silent | gau | gf redirect | uro | while read url; do cat /path/to/or-payloads.txt | while read payload; do echo "$url" | qsreplace "$payload"; done; done | httpx -silent -fr -mr "google.com"`
+6.  **CORS:**
+    *   `nuclei -l live_subs_tech.txt -t /path/to/nuclei-templates/http/vulnerabilities/cors/`
+    *   Ручная проверка: `curl -H "Origin: https://attacker.com" -I https://target.com/api/`
+7.  **Subdomain Takeover:** `subzy run --targets resolved_subs.txt --concurrency 100 --hide_fails --verify_ssl -o subzy_results.txt`
+8.  **.git/.DS_Store Disclosure:**
+    *   `cat live_subs_tech.txt | httpx -path "/.git/" -mc 200,403 -ms "Index of /.git" -o git_disclosure.txt`
+    *   Используйте `git-dumper`, `dvcs-ripper` для эксплойта.
+
+**Этап 11: Заключение и Анализ**
+1.  **Консолидация результатов:** Соберите вывод всех инструментов (`nuclei_results.txt`, `dalfox_results.txt`, `subzy_results.txt`, `ffuf_dir.txt`, `sensitive_files.txt`, `arjun_results.txt`, `live_js_secrets.txt` и т.д.).
+2.  **Приоритизация:** Сфокусируйтесь на критических/высокоуровневых уязвимостях (SQLi, RCE, SSRF, значительные XSS/Open Redirect, важные данные в секретах/файлах).
+3.  **Верификация:** Вручную подтвердите все автоматически найденные потенциальные уязвимости перед отчетом.
+4.  **Документирование:** Задокументируйте шаги для воспроизведения, PoC (скриншоты, видео, curl-запросы).
+5.  **Отчет:** Отправьте четкий, структурированный отчет на платформу Bug Bounty.
+
+**Ключевые принципы:**
+*   **Полнота:** Стремитесь к максимальному охвату атакуемой поверхности.
+*   **Автоматизация:** Используйте скрипты и пайплайны для повторяющихся задач.
+*   **Организация:** Храните результаты каждого этапа в отдельные файлы.
+*   **Адаптация:** Подбирайте инструменты, порты, вордлисты и параметры сканирования под конкретную цель.
+*   **Контекст:** Анализируйте найденные технологии и данные для понимания уязвимых мест.
+*   **Безопасность:** Уважайте правила программ Bug Bounty, не проводите деструктивное тестирование без разрешения.
+
